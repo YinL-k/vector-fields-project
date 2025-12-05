@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>2D Vector Interactive Demo</title>
+  <style>
+    body {
+      background: #f5f5f5;
+      font-family: system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin: 0;
+      padding-top: 20px;
+    }
+    #info {
+      margin-bottom: 6px;
+      font-size: 20px;      /* 更大 */
+      font-weight: bold;    /* 加粗 */
+    }
+    #savedVectors {
+      margin-bottom: 6px;
+      font-size: 14px;
+      display: none;        /* 默认隐藏 */
+    }
+    #controls {
+      margin-bottom: 10px;
+    }
+    #controls button {
+      margin: 0 4px;
+      padding: 4px 10px;
+      font-size: 13px;
+    }
+    canvas {
+      background: #fff;
+      border: 1px solid #ccc;
+      box-shadow: 0 0 8px rgba(0,0,0,0.05);
+      cursor: grab;
+    }
+    canvas:active { cursor: grabbing; }
+  </style>
+</head>
+
+<body>
+  <div id="info">Current vector: <span id="vectorText">[0, 0]</span></div>
+
+  <!-- 保存的向量信息，默认隐藏，由 JS 控制显示 -->
+  <div id="savedVectors"></div>
+
+  <div id="controls">
+    <button id="saveV1">Save as V1</button>
+    <button id="saveV2">Save as V2</button>
+    <button id="addVectors">Add V1 + V2</button>
+    <button id="clearVectors">Clear</button>
+  </div>
+
+  <canvas id="canvas" width="600" height="400"></canvas>
+
+  <script>
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    const vectorText = document.getElementById("vectorText");
+    const savedVectorsDiv = document.getElementById("savedVectors");
+
+    const btnSaveV1 = document.getElementById("saveV1");
+    const btnSaveV2 = document.getElementById("saveV2");
+    const btnAdd = document.getElementById("addVectors");
+    const btnClear = document.getElementById("clearVectors");
+
+    const width = canvas.width;
+    const height = canvas.height;
+    const origin = { x: width / 2, y: height / 2 };
+
+    const unit = 25;          // pixels per grid unit
+    const maxCoord = 10;      // clamp to [-10, 10]
+
+    let isDragging = false;
+
+    // Person position (animated) and its target on grid
+    let person = { x: origin.x, y: origin.y };
+    let target = { x: origin.x, y: origin.y };
+
+    // Saved vectors (integer grid coords)
+    let v1 = null;
+    let v2 = null;
+    let showAddition = false;
+
+    // --- coordinate helpers ---
+
+    function canvasToVector(px, py) {
+      return {
+        x: Math.round((px - origin.x) / unit),
+        y: Math.round((origin.y - py) / unit)
+      };
+    }
+
+    function vectorToCanvas(vx, vy) {
+      return {
+        x: origin.x + vx * unit,
+        y: origin.y - vy * unit
+      };
+    }
+
+    function snapToNearestGrid(px, py) {
+      let v = canvasToVector(px, py);
+      v.x = Math.max(-maxCoord, Math.min(maxCoord, v.x));
+      v.y = Math.max(-maxCoord, Math.min(maxCoord, v.y));
+      return vectorToCanvas(v.x, v.y);
+    }
+
+    function getCurrentVector() {
+      // target 始终在格点上
+      return canvasToVector(target.x, target.y);
+    }
+
+    // --- drawing ---
+
+    function drawAxes() {
+      ctx.save();
+      ctx.strokeStyle = "#ddd";
+      ctx.lineWidth = 1;
+
+      // grid
+      for (let i = -maxCoord; i <= maxCoord; i++) {
+        const x = origin.x + i * unit;
+        const y = origin.y + i * unit;
+
+        // vertical grid
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+
+        // horizontal grid
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+      }
+
+      // main axes
+      ctx.strokeStyle = "#555";
+      ctx.lineWidth = 2;
+
+      // X axis
+      ctx.beginPath();
+      ctx.moveTo(0, origin.y);
+      ctx.lineTo(width, origin.y);
+      ctx.stroke();
+
+      // Y axis
+      ctx.beginPath();
+      ctx.moveTo(origin.x, 0);
+      ctx.lineTo(origin.x, height);
+      ctx.stroke();
+
+      // tick labels
+      ctx.fillStyle = "#444";
+      ctx.font = "12px sans-serif";
+      for (let i = -maxCoord; i <= maxCoord; i++) {
+        if (i === 0) continue;
+        // x labels
+        ctx.fillText(i, origin.x + i * unit - 4, origin.y + 14);
+        // y labels (note sign flip)
+        ctx.fillText(-i, origin.x + 6, origin.y + i * unit + 4);
+      }
+
+      // axis labels
+      ctx.font = "18px sans-serif";
+      ctx.fillStyle = "#222";
+      ctx.fillText("X", width - 20, origin.y - 10);
+      ctx.fillText("Y", origin.x + 10, 20);
+
+      ctx.restore();
+    }
+
+    function drawPerson() {
+      ctx.save();
+      ctx.fillStyle = "#1976d2";
+
+      // head
+      ctx.beginPath();
+      ctx.arc(person.x, person.y - 8, 6, 0, Math.PI * 2);
+      ctx.fill();
+
+      // body and limbs
+      ctx.strokeStyle = "#1976d2";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(person.x, person.y - 2);
+      ctx.lineTo(person.x, person.y + 10);
+      ctx.moveTo(person.x, person.y + 10);
+      ctx.lineTo(person.x - 6, person.y + 18);
+      ctx.moveTo(person.x, person.y + 10);
+      ctx.lineTo(person.x + 6, person.y + 18);
+      ctx.moveTo(person.x, person.y + 2);
+      ctx.lineTo(person.x - 8, person.y + 2);
+      ctx.moveTo(person.x, person.y + 2);
+      ctx.lineTo(person.x + 8, person.y + 2);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function drawArrowSegment(fromX, fromY, toX, toY, color, lineWidth, dashPattern) {
+      const dx = toX - fromX;
+      const dy = toY - fromY;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 1) return;
+
+      const ux = dx / len;
+      const uy = dy / len;
+      const arrowLen = 12;
+
+      const baseX = toX - ux * arrowLen;
+      const baseY = toY - uy * arrowLen;
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = lineWidth || 2;
+      ctx.setLineDash(dashPattern || []);
+
+      // line
+      ctx.beginPath();
+      ctx.moveTo(fromX, fromY);
+      ctx.lineTo(toX, toY);
+      ctx.stroke();
+
+      // arrow head
+      ctx.beginPath();
+      ctx.moveTo(toX, toY);
+      ctx.lineTo(
+        baseX + (-uy * arrowLen * 0.5),
+        baseY + (ux * arrowLen * 0.5)
+      );
+      ctx.lineTo(
+        baseX - (-uy * arrowLen * 0.5),
+        baseY - (ux * arrowLen * 0.5)
+      );
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    // 新增：画保存的向量（淡色虚线）
+    function drawSavedVectors() {
+      if (!v1 && !v2) return;
+
+      if (v1) {
+        const p1 = vectorToCanvas(v1.x, v1.y);
+        drawArrowSegment(
+          origin.x,
+          origin.y,
+          p1.x,
+          p1.y,
+          "rgba(25, 118, 210, 0.4)",   // 浅蓝
+          1.5,
+          [4, 3]
+        );
+      }
+
+      if (v2) {
+        const p2 = vectorToCanvas(v2.x, v2.y);
+        drawArrowSegment(
+          origin.x,
+          origin.y,
+          p2.x,
+          p2.y,
+          "rgba(67, 160, 71, 0.4)",    // 浅绿
+          1.5,
+          [4, 3]
+        );
+      }
+    }
+
+    function drawSingleArrow() {
+      const v = canvasToVector(person.x, person.y);
+      if (v.x === 0 && v.y === 0) return;
+
+      const end = vectorToCanvas(v.x, v.y);
+      drawArrowSegment(origin.x, origin.y, end.x, end.y, "#e53935", 2);
+    }
+
+    function drawAdditionVectors() {
+      if (!showAddition || !v1 || !v2) return;
+
+      const p1 = vectorToCanvas(v1.x, v1.y);
+      const sum = { x: v1.x + v2.x, y: v1.y + v2.y };
+      const pSum = vectorToCanvas(sum.x, sum.y);
+
+      // V1
+      drawArrowSegment(origin.x, origin.y, p1.x, p1.y, "#1976d2", 2);
+      // V2 shifted
+      drawArrowSegment(p1.x, p1.y, pSum.x, pSum.y, "#43a047", 2, [6, 4]);
+      // V1 + V2
+      drawArrowSegment(origin.x, origin.y, pSum.x, pSum.y, "#e53935", 3);
+    }
+
+    function updateVectorText() {
+      const v = canvasToVector(person.x, person.y);
+      vectorText.textContent = `[${v.x}, ${v.y}]`;
+    }
+
+    // 控制 V1 / V2 / V1+V2 文本显示
+    function updateSavedVectorText() {
+      if (!v1 && !v2) {
+        savedVectorsDiv.style.display = "none";
+        savedVectorsDiv.textContent = "";
+        return;
+      }
+
+      const parts = [];
+      if (v1) parts.push(`V1: [${v1.x}, ${v1.y}]`);
+      if (v2) parts.push(`V2: [${v2.x}, ${v2.y}]`);
+      if (v1 && v2) {
+        const sum = { x: v1.x + v2.x, y: v1.y + v2.y };
+      }
+
+      savedVectorsDiv.textContent = parts.join("    ");
+      savedVectorsDiv.style.display = "block";
+    }
+
+    function redraw() {
+      ctx.clearRect(0, 0, width, height);
+      drawAxes();
+      drawSavedVectors();                // 先画淡色保存线
+      if (showAddition && v1 && v2) {
+        drawAdditionVectors();           // 再画加法演示
+      } else {
+        drawSingleArrow();               // 否则只画当前向量
+      }
+      drawPerson();
+      updateVectorText();
+    }
+
+    // --- animation loop ---
+    function animate() {
+      person.x += (target.x - person.x) * 0.25;
+      person.y += (target.y - person.y) * 0.25;
+
+      redraw();
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+    // --- mouse events ---
+
+    canvas.addEventListener("mousedown", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      const dist = Math.hypot(x - person.x, y - person.y);
+      if (dist < 20) {
+        isDragging = true;
+        showAddition = false; // 再拖动就退出加法演示
+      }
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+      if (!isDragging) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+
+      target = snapToNearestGrid(px, py);
+    });
+
+    canvas.addEventListener("mouseup", () => { isDragging = false; });
+    canvas.addEventListener("mouseleave", () => { isDragging = false; });
+
+    // --- buttons ---
+
+    btnSaveV1.addEventListener("click", () => {
+      v1 = getCurrentVector();
+      showAddition = false;
+      updateSavedVectorText();
+    });
+
+    btnSaveV2.addEventListener("click", () => {
+      v2 = getCurrentVector();
+      showAddition = false;
+      updateSavedVectorText();
+    });
+
+    btnAdd.addEventListener("click", () => {
+      if (!v1 || !v2) return;
+
+      const sum = { x: v1.x + v2.x, y: v1.y + v2.y };
+      const sumCanvas = vectorToCanvas(sum.x, sum.y);
+
+      target = sumCanvas;     // 小人移动到 V1+V2 的位置
+      showAddition = true;    // 开启向量加法演示
+      updateSavedVectorText();
+    });
+
+    btnClear.addEventListener("click", () => {
+      // 清除所有值 & 线 & 重置位置
+      v1 = null;
+      v2 = null;
+      showAddition = false;
+      target = { x: origin.x, y: origin.y };
+      person = { x: origin.x, y: origin.y };
+      updateSavedVectorText();
+    });
+  </script>
+</body>
+</html>
