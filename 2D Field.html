@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Vector Field Particle Visualization</title>
+  <style>
+    body {
+      margin: 0;
+      background: #111;
+      color: #eee;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    #controls {
+      margin: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      align-items: flex-start;
+    }
+
+    #fieldCanvas {
+      border: 1px solid #555;
+      background: #000;
+    }
+
+    input {
+      background: #222;
+      border: 1px solid #555;
+      color: #eee;
+      padding: 2px 4px;
+      font-size: 12px;
+    }
+
+    button {
+      background: #333;
+      border: 1px solid #777;
+      color: #eee;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #444;
+    }
+
+    #errorMsg {
+      color: #f66;
+      font-size: 12px;
+      margin-left: 6px;
+    }
+  </style>
+</head>
+<body>
+<div id="controls">
+  <div>
+    <button id="toggleFieldBtn">Show vector field</button>
+    <span style="margin-left:8px;">
+      Left click to release “water” (particles). Hold to emit continuously.
+    </span>
+  </div>
+
+  <div id="functionControls">
+    <span>f(x, y) = [</span>
+    <input id="fxInput" value="x" size="8" title="Expression for x component, e.g. x, -y, 2x, Math.sin(y)">
+    <span>,</span>
+    <input id="fyInput" value="y" size="8" title="Expression for y component, e.g. y, x, -2y, Math.cos(x)">
+    <span>]</span>
+    <button id="applyFnBtn" style="margin-left:8px;">Apply</button>
+    <span id="errorMsg"></span>
+  </div>
+</div>
+
+<canvas id="fieldCanvas" width="800" height="600"></canvas>
+
+<script>
+  const canvas = document.getElementById('fieldCanvas');
+  const ctx = canvas.getContext('2d');
+
+  const width = canvas.width;
+  const height = canvas.height;
+
+  // world coordinates range for x,y
+  const worldHalfRange = 5; // x,y ∈ [-5, 5]
+  const scale = width / (2 * worldHalfRange); // world → pixel
+
+  // UI elements
+  const toggleBtn = document.getElementById('toggleFieldBtn');
+  const fxInput = document.getElementById('fxInput');
+  const fyInput = document.getElementById('fyInput');
+  const applyFnBtn = document.getElementById('applyFnBtn');
+  const errorMsg = document.getElementById('errorMsg');
+
+  // state
+  let showField = false;
+  const particles = [];
+
+  // mouse state for continuous emission
+  let isMouseDown = false;
+  let mouseWorldPos = null;
+  let emitAccumulator = 0; // time accumulator for emission
+
+  // dynamic vector field f(x,y) = [fx(x,y), fy(x,y)]
+  let fx = (x, y) => x;
+  let fy = (x, y) => y;
+
+  // 预处理用户输入，把类似 "2x", "-2x", "2(x+y)" 等转成合法 JS 表达式
+  function preprocessExpr(expr) {
+    let s = expr.trim();
+
+    // 在数字或 ')' 和 x/y 之间加 *
+    s = s.replace(/(\d|\))(?=[xy])/g, '$1*');
+
+    // 在数字或 ')' 和 '(' 之间加 *
+    s = s.replace(/(\d|\))(?=\()/g, '$1*');
+
+    // 在 x/y 和 数字或 '(' 之间加 *
+    s = s.replace(/([xy])(?=\d|\()/g, '$1*');
+
+    // 把 ^ 换成 **
+    s = s.replace(/\^/g, '**');
+
+    return s;
+  }
+
+  function applyFunctions() {
+    const newFxExprRaw = fxInput.value.trim() || '0';
+    const newFyExprRaw = fyInput.value.trim() || '0';
+
+    const newFxExpr = preprocessExpr(newFxExprRaw);
+    const newFyExpr = preprocessExpr(newFyExprRaw);
+
+    try {
+      const testFx = new Function('x', 'y', 'return ' + newFxExpr + ';');
+      const testFy = new Function('x', 'y', 'return ' + newFyExpr + ';');
+
+      // simple test call to catch most errors
+      const vx = Number(testFx(1, 1));
+      const vy = Number(testFy(1, 1));
+      if (!isFinite(vx) || !isFinite(vy)) {
+        throw new Error('Non-finite result');
+      }
+
+      fx = testFx;
+      fy = testFy;
+      errorMsg.textContent = '';
+    } catch (e) {
+      errorMsg.textContent = 'Invalid function expression.';
+    }
+  }
+
+  applyFnBtn.onclick = applyFunctions;
+
+  // toggle vector field visibility
+  toggleBtn.onclick = () => {
+    showField = !showField;
+    toggleBtn.textContent = showField ? 'Hide vector field' : 'Show vector field';
+  };
+
+  // coordinate transforms
+  function worldToScreen(x, y) {
+    const px = width / 2 + x * scale;
+    const py = height / 2 - y * scale;
+    return { px, py };
+  }
+
+  function screenToWorld(px, py) {
+    const x = (px - width / 2) / scale;
+    const y = (height / 2 - py) / scale;
+    return { x, y };
+  }
+
+  // vector field wrapper
+  function field(x, y) {
+    let vx, vy;
+    try {
+      vx = fx(x, y);
+      vy = fy(x, y);
+      vx = Number(vx);
+      vy = Number(vy);
+      if (!isFinite(vx) || !isFinite(vy)) {
+        vx = 0;
+        vy = 0;
+      }
+    } catch {
+      vx = 0;
+      vy = 0;
+    }
+    return { vx, vy };
+  }
+
+  // spawn particles around a world position
+  function spawnParticles(x, y, count) {
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.random() * 0.15;
+      particles.push({
+        x: x + Math.cos(angle) * r,
+        y: y + Math.sin(angle) * r,
+        life: 4 + Math.random() * 2
+      });
+    }
+  }
+
+  // mouse events
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return; // left button only
+    isMouseDown = true;
+
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    mouseWorldPos = screenToWorld(px, py);
+
+    // initial burst
+    spawnParticles(mouseWorldPos.x, mouseWorldPos.y, 50);
+  });
+
+  canvas.addEventListener('mouseup', (e) => {
+    if (e.button !== 0) return;
+    isMouseDown = false;
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    isMouseDown = false;
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!isMouseDown) return;
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    mouseWorldPos = screenToWorld(px, py);
+  });
+
+  // draw vector field
+  function drawField() {
+    const gridStep = 1; // in world coords
+    const arrowScale = 0.3;
+
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(0, 200, 255, 0.5)';
+
+    for (let x = -worldHalfRange; x <= worldHalfRange; x += gridStep) {
+      for (let y = -worldHalfRange; y <= worldHalfRange; y += gridStep) {
+        const { vx, vy } = field(x, y);
+
+        let len = Math.sqrt(vx * vx + vy * vy);
+        if (len === 0) continue;
+        const nx = (vx / len) * arrowScale;
+        const ny = (vy / len) * arrowScale;
+
+        const start = worldToScreen(x, y);
+        const end = worldToScreen(x + nx, y + ny);
+
+        ctx.beginPath();
+        ctx.moveTo(start.px, start.py);
+        ctx.lineTo(end.px, end.py);
+        ctx.stroke();
+
+        const angle = Math.atan2(end.py - start.py, end.px - start.px);
+        const headLen = 6;
+
+        ctx.beginPath();
+        ctx.moveTo(end.px, end.py);
+        ctx.lineTo(
+          end.px - headLen * Math.cos(angle - Math.PI / 6),
+          end.py - headLen * Math.sin(angle - Math.PI / 6)
+        );
+        ctx.lineTo(
+          end.px - headLen * Math.cos(angle + Math.PI / 6),
+          end.py - headLen * Math.sin(angle + Math.PI / 6)
+        );
+        ctx.closePath();
+        ctx.stroke();
+      }
+    }
+  }
+
+  // update particles
+  let lastTime = performance.now();
+  function update(dt) {
+    const removeIndices = [];
+
+    // continuous emission while holding mouse
+    if (isMouseDown && mouseWorldPos) {
+      const emissionInterval = 0.05; // seconds between bursts
+      emitAccumulator += dt;
+      while (emitAccumulator >= emissionInterval) {
+        spawnParticles(mouseWorldPos.x, mouseWorldPos.y, 15);
+        emitAccumulator -= emissionInterval;
+      }
+    } else {
+      emitAccumulator = 0;
+    }
+
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+
+      const v = field(p.x, p.y);
+      const speedScale = 0.7;
+      p.x += v.vx * dt * speedScale;
+      p.y += v.vy * dt * speedScale;
+
+      p.life -= dt;
+      if (
+        p.life <= 0 ||
+        Math.abs(p.x) > worldHalfRange * 1.5 ||
+        Math.abs(p.y) > worldHalfRange * 1.5
+      ) {
+        removeIndices.push(i);
+      }
+    }
+
+    for (let i = removeIndices.length - 1; i >= 0; i--) {
+      particles.splice(removeIndices[i], 1);
+    }
+  }
+
+  // draw particles
+  function drawParticles() {
+    ctx.fillStyle = 'rgba(0, 255, 180, 0.9)';
+    for (const p of particles) {
+      const { px, py } = worldToScreen(p.x, p.y);
+      const r = 2;
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // main loop
+  function loop(now) {
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+
+    update(dt);
+
+    ctx.clearRect(0, 0, width, height);
+
+    if (showField) drawField();
+    drawParticles();
+
+    requestAnimationFrame(loop);
+  }
+
+  requestAnimationFrame(loop);
+</script>
+</body>
+</html>
