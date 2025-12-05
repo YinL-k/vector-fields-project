@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>3D Vector Field Particle Visualization</title>
+  <style>
+    body {
+      margin: 0;
+      background: #111;
+      color: #eee;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    #controls {
+      margin: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      align-items: flex-start;
+      font-size: 13px;
+      width: 900px;
+    }
+
+    #topRow {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    input {
+      background: #222;
+      border: 1px solid #555;
+      color: #eee;
+      padding: 2px 4px;
+      font-size: 12px;
+      width: 90px;
+    }
+
+    button {
+      background: #333;
+      border: 1px solid #777;
+      color: #eee;
+      padding: 4px 8px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    button:hover {
+      background: #444;
+    }
+
+    #errorMsg {
+      color: #f66;
+      font-size: 12px;
+      margin-left: 6px;
+    }
+
+    #rendererContainer {
+      width: 900px;
+      height: 600px;
+      border: 1px solid #555;
+      background: #000;
+    }
+  </style>
+</head>
+<body>
+<div id="controls">
+  <div id="topRow">
+    <div>
+      <button id="toggleFieldBtn">Show vector field</button>
+      <span style="margin-left:8px;">
+        Hold <b>Shift + Left mouse</b> to emit tracer particles in front of the camera (hold to emit continuously).
+      </span>
+    </div>
+    <div>
+      <button id="playPauseBtn">Play</button>
+    </div>
+  </div>
+
+  <div>
+    <span>f(x, y, z) = [</span>
+    <input id="fxInput" value="x" title="x component, e.g. x, -y, 2x, Math.sin(y)">
+    <span>,</span>
+    <input id="fyInput" value="y" title="y component, e.g. y, x, -2y, Math.cos(x)">
+    <span>,</span>
+    <input id="fzInput" value="z" title="z component, e.g. z, x+y, -z, Math.sin(x*y)">
+    <span>]</span>
+    <button id="applyFnBtn" style="margin-left:8px;">Apply field</button>
+    <span id="errorMsg"></span>
+  </div>
+
+  <div style="opacity:0.8;">
+    Left mouse drag: orbit camera. Mouse wheel: zoom.<br>
+    Supports implicit multiplications (2x, (x+y)z) and powers (x^2 + y^2). You can also use Math.sin, Math.cos, etc.
+  </div>
+</div>
+
+<div id="rendererContainer"></div>
+
+<!-- Three.js -->
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script>
+  // ========= DOM & UI =========
+  const container = document.getElementById('rendererContainer');
+  const toggleFieldBtn = document.getElementById('toggleFieldBtn');
+  const playPauseBtn = document.getElementById('playPauseBtn');
+  const fxInput = document.getElementById('fxInput');
+  const fyInput = document.getElementById('fyInput');
+  const fzInput = document.getElementById('fzInput');
+  const applyFnBtn = document.getElementById('applyFnBtn');
+  const errorMsg = document.getElementById('errorMsg');
+
+  let showField = false;
+  let paused = true;   // 默认暂停：可以先放水，再点 Play 让粒子流动
+
+  playPauseBtn.onclick = () => {
+    paused = !paused;
+    playPauseBtn.textContent = paused ? 'Play' : 'Pause';
+  };
+
+  // ========= Expression handling =========
+  function preprocessExpr(expr) {
+    let s = expr.trim();
+    s = s.replace(/(\d|\))(?=[xyz])/g, '$1*');   // 2x -> 2*x
+    s = s.replace(/(\d|\))(?=\()/g, '$1*');      // 2(x+y) -> 2*(x+y)
+    s = s.replace(/([xyz])(?=\d|\()/g, '$1*');   // x2 -> x*2, x(x+y) -> x*(x+y)
+    s = s.replace(/\^/g, '**');                  // x^2 -> x**2
+    return s;
+  }
+
+  let fx = (x, y, z) => x;
+  let fy = (x, y, z) => y;
+  let fz = (x, y, z) => z;
+
+  function applyFunctions3D() {
+    const newFxExprRaw = fxInput.value.trim() || '0';
+    const newFyExprRaw = fyInput.value.trim() || '0';
+    const newFzExprRaw = fzInput.value.trim() || '0';
+
+    const newFxExpr = preprocessExpr(newFxExprRaw);
+    const newFyExpr = preprocessExpr(newFyExprRaw);
+    const newFzExpr = preprocessExpr(newFzExprRaw);
+
+    try {
+      const testFx = new Function('x', 'y', 'z', 'return ' + newFxExpr + ';');
+      const testFy = new Function('x', 'y', 'z', 'return ' + newFyExpr + ';');
+      const testFz = new Function('x', 'y', 'z', 'return ' + newFzExpr + ';');
+
+      const vx = Number(testFx(1, 1, 1));
+      const vy = Number(testFy(1, 1, 1));
+      const vz = Number(testFz(1, 1, 1));
+      if (!isFinite(vx) || !isFinite(vy) || !isFinite(vz)) {
+        throw new Error('Non-finite result');
+      }
+
+      fx = testFx;
+      fy = testFy;
+      fz = testFz;
+
+      errorMsg.textContent = '';
+      updateFieldArrows();
+    } catch (e) {
+      console.error(e);
+      errorMsg.textContent = 'Invalid expression. Check parentheses and Math.* functions.';
+    }
+  }
+
+  applyFnBtn.addEventListener('click', applyFunctions3D);
+
+  // ========= Three.js scene =========
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x000000);
+
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  container.appendChild(renderer.domElement);
+
+  function onWindowResize() {
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  }
+  onWindowResize();
+  window.addEventListener('resize', onWindowResize);
+
+  // Camera orbit parameters (spherical coordinates)
+  let radius = 18;
+  let theta = Math.PI / 4;  // around y-axis
+  let phi = Math.PI / 4;    // from y+ axis
+
+  function updateCamera() {
+    const sinPhi = Math.sin(phi);
+    camera.position.set(
+      radius * sinPhi * Math.sin(theta),
+      radius * Math.cos(phi),
+      radius * sinPhi * Math.cos(theta)
+    );
+    camera.lookAt(0, 0, 0);
+  }
+  updateCamera();
+
+  // Axes and ground grid
+  const axesHelper = new THREE.AxesHelper(6);
+  scene.add(axesHelper);
+
+  const grid = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+  scene.add(grid); // y=0, xz-plane
+
+  // ========= Vector field arrows =========
+  const fieldGroup = new THREE.Group();
+  scene.add(fieldGroup);
+
+  const fieldSamples = [];
+  const worldHalfRange = 4; // x,y,z ∈ [-4,4]
+  const gridStep = 2;
+
+  for (let x = -worldHalfRange; x <= worldHalfRange; x += gridStep) {
+    for (let y = -worldHalfRange; y <= worldHalfRange; y += gridStep) {
+      for (let z = -worldHalfRange; z <= worldHalfRange; z += gridStep) {
+        const origin = new THREE.Vector3(x, y, z);
+        const dir = new THREE.Vector3(1, 0, 0);
+        const length = 0.001;
+        const color = 0x00bfff;
+        const arrow = new THREE.ArrowHelper(
+          dir.normalize(),
+          origin,
+          length,
+          color,
+          0.3,
+          0.15
+        );
+        arrow.line.material.transparent = true;
+        arrow.cone.material.transparent = true;
+
+        fieldGroup.add(arrow);
+        fieldSamples.push({ origin, arrow });
+      }
+    }
+  }
+
+  fieldGroup.visible = false;
+  toggleFieldBtn.onclick = () => {
+    showField = !showField;
+    fieldGroup.visible = showField;
+    toggleFieldBtn.textContent = showField ? 'Hide vector field' : 'Show vector field';
+  };
+
+  function field(x, y, z) {
+    let vx, vy, vz;
+    try {
+      vx = Number(fx(x, y, z));
+      vy = Number(fy(x, y, z));
+      vz = Number(fz(x, y, z));
+      if (!isFinite(vx) || !isFinite(vy) || !isFinite(vz)) {
+        vx = vy = vz = 0;
+      }
+    } catch (e) {
+      vx = vy = vz = 0;
+    }
+    return { vx, vy, vz };
+  }
+
+  function updateFieldArrows() {
+    const maxLen = 3.0;
+    const baseLen = 0.4;
+    for (const item of fieldSamples) {
+      const { origin, arrow } = item;
+      const v = field(origin.x, origin.y, origin.z);
+      const len = Math.sqrt(v.vx * v.vx + v.vy * v.vy + v.vz * v.vz);
+      if (len < 1e-3) {
+        arrow.visible = false;
+        continue;
+      }
+      arrow.visible = true;
+      const dir = new THREE.Vector3(v.vx, v.vy, v.vz).normalize();
+      arrow.setDirection(dir);
+
+      const scaled = baseLen + Math.min(len, maxLen);
+      arrow.setLength(scaled, 0.3, 0.15);
+    }
+  }
+  updateFieldArrows();
+
+  // distance-based opacity for arrows: near camera = more transparent
+  const tmpWorldPos = new THREE.Vector3();
+  function updateFieldArrowsOpacity() {
+    if (!showField) return;
+
+    const nearDist = 5;
+    const farDist = 30;
+    const alphaNear = 0.05; // very transparent when close
+    const alphaFar = 1.0;   // fully opaque when far
+
+    for (const { arrow } of fieldSamples) {
+      if (!arrow.visible) continue;
+
+      arrow.getWorldPosition(tmpWorldPos);
+      const d = camera.position.distanceTo(tmpWorldPos);
+
+      let alpha;
+      if (d <= nearDist) {
+        alpha = alphaNear;
+      } else if (d >= farDist) {
+        alpha = alphaFar;
+      } else {
+        const t = (d - nearDist) / (farDist - nearDist);
+        alpha = alphaNear * (1 - t) + alphaFar * t;
+      }
+
+      arrow.line.material.opacity = alpha;
+      arrow.cone.material.opacity = alpha;
+    }
+  }
+
+  // ========= Particle system (sprite + additive blending) =========
+  function createSpriteTexture() {
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    const gradient = ctx.createRadialGradient(
+      size / 2, size / 2, 0,
+      size / 2, size / 2, size / 2
+    );
+    gradient.addColorStop(0.0, 'rgba(255,255,255,1)');
+    gradient.addColorStop(0.3, 'rgba(255,255,255,0.8)');
+    gradient.addColorStop(0.7, 'rgba(255,255,255,0.15)');
+    gradient.addColorStop(1.0, 'rgba(255,255,255,0)');
+
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, size, size);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    return texture;
+  }
+
+  const particles = [];
+  const maxParticles = 6000;
+  const particlePositions = new Float32Array(maxParticles * 3);
+  const particleGeometry = new THREE.BufferGeometry();
+  particleGeometry.setAttribute(
+    'position',
+    new THREE.BufferAttribute(particlePositions, 3)
+  );
+  particleGeometry.setDrawRange(0, 0);
+
+  const spriteTexture = createSpriteTexture();
+  const particleMaterial = new THREE.PointsMaterial({
+    size: 0.35,
+    map: spriteTexture,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    color: 0x66ccff,
+    opacity: 0.9
+  });
+
+  const particleSystem = new THREE.Points(particleGeometry, particleMaterial);
+  scene.add(particleSystem);
+
+  function spawnParticles(center, count) {
+    for (let i = 0; i < count; i++) {
+      if (particles.length >= maxParticles) {
+        particles.shift(); // drop oldest
+      }
+      const dx = (Math.random() - 0.5) * 0.4;
+      const dz = (Math.random() - 0.5) * 0.4;
+      const dy = (Math.random() - 0.5) * 0.4;
+
+      particles.push({
+        x: center.x + dx,
+        y: center.y + dy,
+        z: center.z + dz,
+        life: 4 + Math.random() * 2
+      });
+    }
+  }
+
+  function advectParticles(dt) {
+    const speedScale = 0.7;
+    const limit = worldHalfRange * 1.8;
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      const v = field(p.x, p.y, p.z);
+
+      p.x += v.vx * dt * speedScale;
+      p.y += v.vy * dt * speedScale;
+      p.z += v.vz * dt * speedScale;
+
+      p.life -= dt;
+      if (
+        p.life <= 0 ||
+        Math.abs(p.x) > limit ||
+        Math.abs(p.y) > limit ||
+        Math.abs(p.z) > limit
+      ) {
+        particles.splice(i, 1);
+      }
+    }
+  }
+
+  function syncParticlesGeometry() {
+    const n = particles.length;
+    for (let i = 0; i < n; i++) {
+      const p = particles[i];
+      particlePositions[3 * i] = p.x;
+      particlePositions[3 * i + 1] = p.y;
+      particlePositions[3 * i + 2] = p.z;
+    }
+    particleGeometry.setDrawRange(0, n);
+    particleGeometry.attributes.position.needsUpdate = true;
+  }
+
+  // ========= Emission: in front of camera at fixed offset =========
+  let isRotating = false;
+  let lastX = 0;
+  let lastY = 0;
+
+  let isEmitting = false;
+  let emitAccumulator = 0;
+  const emitWorldPos = new THREE.Vector3();
+  const emitOffset = 9; // distance in front of the camera
+
+  function updateEmitPosFromCamera() {
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward); // normalized
+    emitWorldPos.copy(camera.position).add(forward.multiplyScalar(emitOffset));
+  }
+
+  function emitParticles(dt) {
+    if (isEmitting) {
+      const emissionInterval = 0.05;
+      emitAccumulator += dt;
+      while (emitAccumulator >= emissionInterval) {
+        updateEmitPosFromCamera();
+        spawnParticles(emitWorldPos, 25);
+        emitAccumulator -= emissionInterval;
+      }
+    } else {
+      emitAccumulator = 0;
+    }
+  }
+
+  renderer.domElement.addEventListener('mousedown', (event) => {
+    if (event.button === 0) {
+      if (event.shiftKey) {
+        // Shift + left: emit particles in front of camera
+        isEmitting = true;
+        updateEmitPosFromCamera();
+        spawnParticles(emitWorldPos, 80); // initial burst
+      } else {
+        // plain left: orbit
+        isRotating = true;
+        lastX = event.clientX;
+        lastY = event.clientY;
+      }
+    }
+  });
+
+  window.addEventListener('mouseup', () => {
+    isRotating = false;
+    isEmitting = false;
+  });
+
+  window.addEventListener('mousemove', (event) => {
+    if (isRotating) {
+      const dx = event.clientX - lastX;
+      const dy = event.clientY - lastY;
+      lastX = event.clientX;
+      lastY = event.clientY;
+
+      const rotateSpeed = 0.005;
+      theta -= dx * rotateSpeed;
+      phi -= dy * rotateSpeed;
+      const epsilon = 0.1;
+      phi = Math.max(epsilon, Math.min(Math.PI - epsilon, phi));
+    }
+  });
+
+  renderer.domElement.addEventListener('wheel', (event) => {
+    const zoomSpeed = 0.0015;
+    radius *= 1 + event.deltaY * zoomSpeed;
+    radius = Math.max(5, Math.min(80, radius));
+  });
+
+  // ========= Main loop =========
+  let lastTime = performance.now();
+
+  function animate(now) {
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+
+    // 放水和移动分离：可以在 Pause 状态先“堆”粒子，再 Play 看流动
+    emitParticles(dt);
+    if (!paused) {
+      advectParticles(dt);
+    }
+    syncParticlesGeometry();
+
+    updateCamera();
+    updateFieldArrowsOpacity();
+    renderer.render(scene, camera);
+
+    requestAnimationFrame(animate);
+  }
+
+  requestAnimationFrame(animate);
+</script>
+</body>
+</html>
