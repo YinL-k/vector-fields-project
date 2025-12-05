@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>3D Vector Addition Demo (Z up)</title>
+  <style>
+    body {
+      background: #f5f5f5;
+      font-family: system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin: 0;
+      padding-top: 20px;
+    }
+    #info {
+      margin-bottom: 6px;
+      font-size: 20px;
+      font-weight: bold;
+    }
+    #savedVectors {
+      margin-bottom: 6px;
+      font-size: 14px;
+      display: none;
+    }
+    #topBar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    #controls button {
+      margin: 0 4px;
+      padding: 4px 10px;
+      font-size: 13px;
+    }
+    #vectorInputs {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+    #vectorInputs label {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    #vectorInputs input[type="number"] {
+      width: 48px;
+    }
+    canvas {
+      background: #fff;
+      border: 1px solid #ccc;
+      box-shadow: 0 0 8px rgba(0,0,0,0.05);
+      cursor: grab;
+    }
+    canvas:active { cursor: grabbing; }
+  </style>
+</head>
+<body>
+  <div id="info">Current vector: <span id="vectorText">[0, 0, 0]</span></div>
+
+  <div id="savedVectors"></div>
+
+  <div id="topBar">
+    <div id="controls">
+      <button id="saveV1">Save as V1</button>
+      <button id="saveV2">Save as V2</button>
+      <button id="addVectors">Show V1 + V2</button>
+      <button id="clearVectors">Reset</button>
+    </div>
+
+    <div id="vectorInputs">
+      <span>Edit current vector:</span>
+      <label>X:
+        <input type="number" id="xInput" min="-10" max="10" value="0">
+      </label>
+      <label>Y:
+        <input type="number" id="yInput" min="-10" max="10" value="0">
+      </label>
+      <label>Z:
+        <input type="number" id="zInput" min="-10" max="10" value="0">
+      </label>
+      <span style="font-size:12px;color:#555;">(Left-drag to orbit, mouse wheel to zoom)</span>
+    </div>
+  </div>
+
+  <canvas id="canvas" width="700" height="480"></canvas>
+
+  <script>
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    const vectorText = document.getElementById("vectorText");
+    const savedVectorsDiv = document.getElementById("savedVectors");
+
+    const btnSaveV1 = document.getElementById("saveV1");
+    const btnSaveV2 = document.getElementById("saveV2");
+    const btnAdd = document.getElementById("addVectors");
+    const btnClear = document.getElementById("clearVectors");
+
+    const xInput = document.getElementById("xInput");
+    const yInput = document.getElementById("yInput");
+    const zInput = document.getElementById("zInput");
+
+    const width = canvas.width;
+    const height = canvas.height;
+    const origin = { x: width / 2, y: height / 2 };
+    const unit = 25;         // 1 unit = 25 pixels
+    const maxCoord = 10;
+
+    // ========= Orbit camera with spherical coords (radius, theta, phi) =========
+    // radius: distance from camera to origin
+    // theta:  rotation around vertical axis
+    // phi:    angle from +Z axis downwards (we changed to Z-up)
+    let radius = 40;
+    let theta = Math.PI / 4;
+    let phi   = Math.PI / 3;
+
+    const focalLength = 40;  // controls perspective strength
+
+    const camPos = { x: 0, y: 0, z: 0 };
+    const camForward = { x: 0, y: 0, z: 0 };
+    const camRight = { x: 0, y: 0, z: 0 };
+    const camUp = { x: 0, y: 0, z: 0 };
+
+    let isRotating = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+
+    function clamp(v, min, max) {
+      return Math.max(min, Math.min(max, v));
+    }
+
+    function normalize3(v) {
+      const len = Math.hypot(v.x, v.y, v.z);
+      if (len < 1e-8) return;
+      v.x /= len;
+      v.y /= len;
+      v.z /= len;
+    }
+
+    // 把 (radius, theta, phi) 算成相机位置 + 正交基向量
+    // 注意：我们现在把 Z 轴视为竖直向上（Z-up）
+    function updateCameraVectors() {
+      const sinPhi = Math.sin(phi);
+      const cosPhi = Math.cos(phi);
+      const sinTheta = Math.sin(theta);
+      const cosTheta = Math.cos(theta);
+
+      // Camera position on a sphere around origin (Z-up convention)
+      camPos.x = radius * sinPhi * Math.sin(theta);
+      camPos.y = radius * sinPhi * Math.cos(theta);
+      camPos.z = radius * cosPhi;
+
+      // Forward: from camera to origin (相机指向原点)
+      camForward.x = -camPos.x;
+      camForward.y = -camPos.y;
+      camForward.z = -camPos.z;
+      normalize3(camForward);
+
+      // World up (Z-up)
+      const upWorld = { x: 0, y: 0, z: 1 };
+
+      // Right = forward × upWorld
+      camRight.x = camForward.y * upWorld.z - camForward.z * upWorld.y;
+      camRight.y = camForward.z * upWorld.x - camForward.x * upWorld.z;
+      camRight.z = camForward.x * upWorld.y - camForward.y * upWorld.x;
+      normalize3(camRight);
+
+      // 如果 forward ~ upWorld 造成数值问题，用一个备用 right
+      if (Math.abs(camRight.x) + Math.abs(camRight.y) + Math.abs(camRight.z) < 1e-6) {
+        camRight.x = 1; camRight.y = 0; camRight.z = 0;
+      }
+
+      // Up = right × forward
+      camUp.x = camRight.y * camForward.z - camRight.z * camForward.y;
+      camUp.y = camRight.z * camForward.x - camRight.x * camForward.z;
+      camUp.z = camRight.x * camForward.y - camRight.y * camForward.x;
+      normalize3(camUp);
+    }
+
+    // ---- 3D transform & projection (use orbit camera)
+    function rotateAndProject(x, y, z) {
+      // 这里不旋转物体，只是把世界坐标投到当前相机坐标系
+      const vx = x - camPos.x;
+      const vy = y - camPos.y;
+      const vz = z - camPos.z;
+
+      // Camera space
+      const cx = vx * camRight.x + vy * camRight.y + vz * camRight.z;
+      const cy = vx * camUp.x    + vy * camUp.y    + vz * camUp.z;
+      let cz  = vx * camForward.x + vy * camForward.y + vz * camForward.z;
+
+      if (cz <= 1e-3) cz = 1e-3; // 避免除零和背面爆炸
+
+      const factor = focalLength / cz;
+      const sx = origin.x + cx * unit * factor;
+      const sy = origin.y - cy * unit * factor;
+      return { x: sx, y: sy };
+    }
+
+    function drawArrow2D(x1, y1, x2, y2, color, lineWidth = 2, dash = []) {
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 1) return;
+
+      const ux = dx / len;
+      const uy = dy / len;
+      const arrowLen = 12;
+
+      const baseX = x2 - ux * arrowLen;
+      const baseY = y2 - uy * arrowLen;
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = lineWidth;
+      ctx.setLineDash(dash);
+
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(
+        baseX + (-uy * arrowLen * 0.5),
+        baseY + (ux * arrowLen * 0.5)
+      );
+      ctx.lineTo(
+        baseX - (-uy * arrowLen * 0.5),
+        baseY - (ux * arrowLen * 0.5)
+      );
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawAxis3D(from, to, color, width = 2) {
+      const p1 = rotateAndProject(from.x, from.y, from.z);
+      const p2 = rotateAndProject(to.x, to.y, to.z);
+      drawArrow2D(p1.x, p1.y, p2.x, p2.y, color, width);
+    }
+
+    function drawGrid() {
+      ctx.save();
+      ctx.lineWidth = 1;
+
+      // Base XY plane (z = 0)
+      ctx.strokeStyle = "#e0e0e0";
+      for (let i = -maxCoord; i <= maxCoord; i++) {
+        // parallel to X axis
+        let p1 = rotateAndProject(-maxCoord, i, 0);
+        let p2 = rotateAndProject(maxCoord, i, 0);
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+
+        // parallel to Y axis
+        let p3 = rotateAndProject(i, -maxCoord, 0);
+        let p4 = rotateAndProject(i, maxCoord, 0);
+        ctx.beginPath();
+        ctx.moveTo(p3.x, p3.y);
+        ctx.lineTo(p4.x, p4.y);
+        ctx.stroke();
+      }
+
+      // Extra grid lines along Z to make depth obvious (Z is vertical)
+      ctx.strokeStyle = "#d0e0ff";
+      for (let j = 0; j <= maxCoord; j += 2) {
+        // plane x = 0, vertical lines along Z
+        let p5 = rotateAndProject(0, j, 0);
+        let p6 = rotateAndProject(0, j, maxCoord);
+        ctx.beginPath();
+        ctx.moveTo(p5.x, p5.y);
+        ctx.lineTo(p6.x, p6.y);
+        ctx.stroke();
+
+        if (j !== 0) {
+          let p7 = rotateAndProject(0, -j, 0);
+          let p8 = rotateAndProject(0, -j, maxCoord);
+          ctx.beginPath();
+          ctx.moveTo(p7.x, p7.y);
+          ctx.lineTo(p8.x, p8.y);
+          ctx.stroke();
+        }
+
+        // plane y = 0, vertical lines along Z
+        let p9 = rotateAndProject(j, 0, 0);
+        let p10 = rotateAndProject(j, 0, maxCoord);
+        ctx.beginPath();
+        ctx.moveTo(p9.x, p9.y);
+        ctx.lineTo(p10.x, p10.y);
+        ctx.stroke();
+
+        if (j !== 0) {
+          let p11 = rotateAndProject(-j, 0, 0);
+          let p12 = rotateAndProject(-j, 0, maxCoord);
+          ctx.beginPath();
+          ctx.moveTo(p11.x, p11.y);
+          ctx.lineTo(p12.x, p12.y);
+          ctx.stroke();
+        }
+      }
+
+      ctx.restore();
+    }
+
+    function drawAxes() {
+      // X axis: orange
+      drawAxis3D({ x: 0, y: 0, z: 0 }, { x: maxCoord, y: 0, z: 0 }, "#ff7043", 2);
+      // Y axis: blue
+      drawAxis3D({ x: 0, y: 0, z: 0 }, { x: 0, y: maxCoord, z: 0 }, "#42a5f5", 2);
+      // Z axis: strong green (vertical)
+      drawAxis3D({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: maxCoord }, "#00897b", 3);
+
+      // Axis labels
+      ctx.save();
+      ctx.fillStyle = "#333";
+      ctx.font = "14px sans-serif";
+
+      const pX = rotateAndProject(maxCoord + 0.7, 0, 0);
+      ctx.fillText("X", pX.x + 2, pX.y - 2);
+
+      const pY = rotateAndProject(0, maxCoord + 0.7, 0);
+      ctx.fillText("Y", pY.x + 2, pY.y - 2);
+
+      const pZ = rotateAndProject(0, 0, maxCoord + 0.7);
+      ctx.fillText("Z", pZ.x + 2, pZ.y - 2);
+
+      // Ticks along Z axis for depth cue
+      ctx.strokeStyle = "#00897b";
+      for (let k = 1; k <= maxCoord; k += 2) {
+        const t = rotateAndProject(0, 0, k);
+        ctx.beginPath();
+        ctx.moveTo(t.x - 4, t.y);
+        ctx.lineTo(t.x + 4, t.y);
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    }
+
+    function drawVectorFrom(start, vec, color, lineWidth = 2, dash = []) {
+      const s = rotateAndProject(start.x, start.y, start.z);
+      const e = rotateAndProject(
+        start.x + vec.x,
+        start.y + vec.y,
+        start.z + vec.z
+      );
+      drawArrow2D(s.x, s.y, e.x, e.y, color, lineWidth, dash);
+    }
+
+    // ========= Vector state & drawing =========
+    let currentVec = { x: 0, y: 0, z: 0 };
+    let v1 = null;
+    let v2 = null;
+    let showAddition = false;
+
+    function drawSavedVectors() {
+      if (!v1 && !v2) return;
+
+      if (v1) {
+        drawVectorFrom(
+          { x: 0, y: 0, z: 0 },
+          v1,
+          "rgba(25, 118, 210, 0.5)",
+          1.5,
+          [5, 3]
+        );
+      }
+      if (v2) {
+        drawVectorFrom(
+          { x: 0, y: 0, z: 0 },
+          v2,
+          "rgba(56, 142, 60, 0.5)",
+          1.5,
+          [5, 3]
+        );
+      }
+    }
+
+    function drawAdditionVectors() {
+      if (!showAddition || !v1 || !v2) return;
+
+      const sum = {
+        x: v1.x + v2.x,
+        y: v1.y + v2.y,
+        z: v1.z + v2.z
+      };
+
+      // V1 from origin
+      drawVectorFrom({ x: 0, y: 0, z: 0 }, v1, "#1976d2", 2);
+
+      // V2 from end of V1 (dashed)
+      drawVectorFrom(v1, v2, "#43a047", 2, [6, 4]);
+
+      // V1+V2 from origin
+      drawVectorFrom({ x: 0, y: 0, z: 0 }, sum, "#e53935", 3);
+    }
+
+    function drawCurrentVector() {
+      if (currentVec.x === 0 && currentVec.y === 0 && currentVec.z === 0) {
+        return;
+      }
+      drawVectorFrom({ x: 0, y: 0, z: 0 }, currentVec, "#e53935", 2);
+    }
+
+    // Draw endpoint with a shadow on XY plane to make Z more visible
+    function drawEndPoint() {
+      // Shadow on z = 0
+      const shadow = rotateAndProject(currentVec.x, currentVec.y, 0);
+      ctx.save();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.15)";
+      ctx.beginPath();
+      ctx.arc(shadow.x, shadow.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Actual point
+      const p = rotateAndProject(currentVec.x, currentVec.y, currentVec.z);
+      ctx.fillStyle = "#1976d2";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function updateVectorText() {
+      vectorText.textContent =
+        "[" + currentVec.x + ", " + currentVec.y + ", " + currentVec.z + "]";
+    }
+
+    function updateInputsFromVector() {
+      xInput.value = currentVec.x;
+      yInput.value = currentVec.y;
+      zInput.value = currentVec.z;
+    }
+
+    function updateSavedVectorText() {
+      if (!v1 && !v2) {
+        savedVectorsDiv.style.display = "none";
+        savedVectorsDiv.textContent = "";
+        return;
+      }
+
+      const parts = [];
+      if (v1) {
+        parts.push(
+          "V1: [" + v1.x + ", " + v1.y + ", " + v1.z + "]"
+        );
+      }
+      if (v2) {
+        parts.push(
+          "V2: [" + v2.x + ", " + v2.y + ", " + v2.z + "]"
+        );
+      }
+      if (v1 && v2) {
+        const sum = {
+          x: v1.x + v2.x,
+          y: v1.y + v2.y,
+          z: v1.z + v2.z
+        };
+        parts.push(
+          "V1 + V2: [" + sum.x + ", " + sum.y + ", " + sum.z + "]"
+        );
+      }
+
+      savedVectorsDiv.textContent = parts.join("    ");
+      savedVectorsDiv.style.display = "block";
+    }
+
+    function redraw() {
+      updateCameraVectors(); // 先更新相机，再画
+      ctx.clearRect(0, 0, width, height);
+      drawGrid();
+      drawAxes();
+      drawSavedVectors();
+
+      if (showAddition && v1 && v2) {
+        drawAdditionVectors();
+      } else {
+        drawCurrentVector();
+      }
+
+      drawEndPoint();
+      updateVectorText();
+    }
+
+    // ---- Vector input logic ----
+    function applyInputToVector() {
+      let x = parseInt(xInput.value, 10);
+      let y = parseInt(yInput.value, 10);
+      let z = parseInt(zInput.value, 10);
+
+      if (isNaN(x)) x = 0;
+      if (isNaN(y)) y = 0;
+      if (isNaN(z)) z = 0;
+
+      x = clamp(x, -maxCoord, maxCoord);
+      y = clamp(y, -maxCoord, maxCoord);
+      z = clamp(z, -maxCoord, maxCoord);
+
+      currentVec = { x, y, z };
+      showAddition = false; // editing current vector cancels addition view
+      updateInputsFromVector();
+      redraw();
+    }
+
+    xInput.addEventListener("input", applyInputToVector);
+    yInput.addEventListener("input", applyInputToVector);
+    zInput.addEventListener("input", applyInputToVector);
+
+    // ---- Mouse rotation logic (left drag orbit) ----
+    canvas.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return; // left button only
+      isRotating = true;
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+      if (!isRotating) return;
+
+      const dx = e.clientX - lastMouseX;
+      const dy = e.clientY - lastMouseY;
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+
+      const rotateSpeed = 0.005;
+      theta += dx * rotateSpeed; // 水平拖动 -> 改 theta (绕竖直轴)
+      phi   -= dy * rotateSpeed; // 垂直拖动 -> 改 phi   (俯仰角)
+
+      const epsilon = 0.1;
+      // 限制 phi，避免相机翻到正上/正下造成视角倒转
+      phi = Math.max(epsilon, Math.min(Math.PI - epsilon, phi));
+
+      redraw();
+    });
+
+    window.addEventListener("mouseup", () => {
+      isRotating = false;
+    });
+    canvas.addEventListener("mouseleave", () => {
+      isRotating = false;
+    });
+
+    // ---- Mouse wheel zoom (change radius) ----
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const zoomSpeed = 0.0015;
+      radius *= 1 + e.deltaY * zoomSpeed;
+      radius = clamp(radius, 15, 80);
+      redraw();
+    }, { passive: false });
+
+    // ---- Button logic ----
+    btnSaveV1.addEventListener("click", () => {
+      v1 = { ...currentVec };
+      showAddition = false;
+      updateSavedVectorText();
+      redraw();
+    });
+
+    btnSaveV2.addEventListener("click", () => {
+      v2 = { ...currentVec };
+      showAddition = false;
+      updateSavedVectorText();
+      redraw();
+    });
+
+    btnAdd.addEventListener("click", () => {
+      if (!v1 || !v2) return;
+      const sum = {
+        x: clamp(v1.x + v2.x, -maxCoord, maxCoord),
+        y: clamp(v1.y + v2.y, -maxCoord, maxCoord),
+        z: clamp(v1.z + v2.z, -maxCoord, maxCoord)
+      };
+      currentVec = sum;
+      showAddition = true;
+      updateInputsFromVector();
+      updateSavedVectorText();
+      redraw();
+    });
+
+    btnClear.addEventListener("click", () => {
+      v1 = null;
+      v2 = null;
+      showAddition = false;
+      currentVec = { x: 0, y: 0, z: 0 };
+      updateInputsFromVector();
+      updateSavedVectorText();
+      redraw();
+    });
+
+    // Initial draw
+    redraw();
+  </script>
+</body>
+</html>
