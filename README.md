@@ -17,6 +17,13 @@ This repository contains a small collection of interactive demonstrations and pr
 
 ### Running the HTML demos
 
+You can also view each demo online via GitHub Pages:
+
+- [2D demo](https://yinl-k.github.io/vector-fields-project/2D.html)
+- [2D field demo](https://yinl-k.github.io/vector-fields-project/2D%20Field.html)
+- [3D demo](https://yinl-k.github.io/vector-fields-project/3D.html)
+- [3D field demo](https://yinl-k.github.io/vector-fields-project/3D%20Field.html)
+
 The HTML files can be opened directly in a browser. However, browsers sometimes restrict local file access, which may prevent the demos from loading external modules (such as three.js) when opened via a `file:///` URL. To avoid this, you can serve the files via a local web server:
 
 ```
